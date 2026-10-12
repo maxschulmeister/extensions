@@ -27,6 +27,7 @@ export async function makeRuntimeContext(exec) {
     writeText: (path, text) => writeText(exec, expandHome(path, env.HOME), text, readTimeoutMs),
     rename: (from, to) => renameFile(exec, expandHome(from, env.HOME), expandHome(to, env.HOME), readTimeoutMs),
     keychain: (service, account = "") => readKeychain(exec, service, account),
+    writeKeychain: (command) => writeKeychain(exec, command),
     http: (request) => httpJSON(exec, request),
   };
 }
@@ -148,6 +149,12 @@ async function readKeychain(exec, service, account) {
   if (account) argv.splice(2, 0, "-a", account);
   const result = await exec(argv, { timeoutMs: readTimeoutMs });
   return result.exitCode === 0 ? result.stdout.trim() : "";
+}
+
+// The command goes to `security -i` on stdin, so secrets do not show in the process list.
+async function writeKeychain(exec, command) {
+  const result = await exec(["/usr/bin/security", "-i"], { stdin: command, timeoutMs: readTimeoutMs });
+  if (result.exitCode !== 0) throw new Error("keychain write failed");
 }
 
 /*

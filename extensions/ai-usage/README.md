@@ -10,7 +10,7 @@ Status bar and popover usage view for common AI coding providers.
 
 ## Network access
 
-Live usage refreshes call provider quota endpoints for Antigravity, Claude Code, Codex, Amp, Copilot, Cursor, Devin, Factory, Grok, OpenRouter, OpenCode Go, Kimi, MiniMax, Z.ai, and Alibaba Token Plan. Requests send only the provider credential already present on the local machine plus the provider-required usage request body. Usage snapshots are cached in `~/Library/Application Support/muxy-ai-usage/status-cache.json` so the status bar can restore immediately after reload; nothing is written to the opened project folder.
+Live usage refreshes call provider quota endpoints for Antigravity, Claude Code, Codex, Amp, Copilot, Cursor, Devin, Factory, Grok, OpenRouter, OpenCode Go, Kimi, MiniMax, Z.ai, and Alibaba Token Plan. Requests send only the provider credential already present on the local machine plus the provider-required usage request body. When Claude Code's access token has expired, AI Usage may refresh it and write the new tokens back to the macOS Keychain or `~/.claude/.credentials.json`, so Claude Code stays signed in. Usage snapshots are cached in `~/Library/Application Support/muxy-ai-usage/status-cache.json` so the status bar can restore immediately after reload; nothing is written to the opened project folder.
 
 ## Providers
 

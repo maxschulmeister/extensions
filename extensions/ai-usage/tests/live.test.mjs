@@ -317,6 +317,112 @@ test("regression: live provider fetch refreshes expired Kimi access token", asyn
   assert.equal(writtenToken?.refresh_token, "kimi-refresh-token");
 });
 
+test("regression: Claude refreshes an expired keychain token and writes it back to the keychain", async () => {
+  const stored = {
+    claudeAiOauth: {
+      accessToken: "claude-expired-token",
+      refreshToken: "claude-refresh-token",
+      expiresAt: Date.now() - 60000,
+      refreshTokenExpiresAt: 1,
+      scopes: ["user:inference", "user:plugins", "user:profile"],
+      subscriptionType: "team",
+      rateLimitTier: "default_claude_max_5x",
+    },
+    mcpOAuth: { keep: "me" },
+  };
+  let keychainWrite = null;
+  const exec = async (argv, options = {}) => {
+    if (argv[0] === "/usr/bin/env") return ok("HOME=/tmp/home\nUSER=max\n");
+    if (argv[0] === "/usr/bin/security" && argv[1] === "find-generic-password" && argv.includes("Claude Code-credentials")) {
+      return argv.includes("max") ? ok(JSON.stringify(stored)) : fail();
+    }
+    if (argv[0] === "/usr/bin/security" && argv[1] === "-i") {
+      keychainWrite = options.stdin;
+      return ok("");
+    }
+    if (argv[2]?.includes("/tmp/muxy/ai-usage-raw-")) return ok("");
+    if (argv[0] === "/usr/bin/curl" && options.stdin.includes("platform.claude.com/v1/oauth/token")) {
+      const body = JSON.parse(JSON.parse(`"${options.stdin.match(/data = "((?:[^"\\]|\\.)*)"/)[1]}"`));
+      assert.deepEqual(body, {
+        grant_type: "refresh_token",
+        refresh_token: "claude-refresh-token",
+        client_id: "9d1c250a-e61b-44d9-88ed-5944d1962f5e",
+        scope: "user:inference user:plugins user:profile",
+      });
+      return ok(`${JSON.stringify({ access_token: "claude-new-token", refresh_token: "claude-new-refresh", expires_in: 28800, refresh_token_expires_in: 86400, scope: "user:inference user:plugins user:profile" })}\n200`);
+    }
+    if (argv[0] === "/usr/bin/curl" && options.stdin.includes("api.anthropic.com/api/oauth/usage")) {
+      assert.match(options.stdin, /Authorization: Bearer claude-new-token/);
+      return ok(`${JSON.stringify({ five_hour: { utilization: 12, resets_at: "2026-06-04T13:00:00.000Z" } })}\n200`);
+    }
+    return fail();
+  };
+
+  const before = Date.now();
+  const snapshots = await fetchLiveSnapshots({ exec, providerIDs: ["claude"] });
+  const claude = snapshots.find((snapshot) => snapshot.id === "claude");
+
+  assert.equal(claude.state.kind, "available");
+  assert.equal(claude.rows[0].percent, 12);
+  const match = keychainWrite?.match(/^add-generic-password -U -a "max" -s "Claude Code-credentials" -X "([0-9a-f]+)"\n$/);
+  assert.ok(match, `unexpected keychain write: ${keychainWrite}`);
+  const written = JSON.parse(Buffer.from(match[1], "hex").toString("utf8"));
+  assert.deepEqual(written.mcpOAuth, { keep: "me" });
+  assert.equal(written.claudeAiOauth.accessToken, "claude-new-token");
+  assert.equal(written.claudeAiOauth.refreshToken, "claude-new-refresh");
+  assert.ok(written.claudeAiOauth.expiresAt >= before + 28800 * 1000);
+  assert.ok(written.claudeAiOauth.refreshTokenExpiresAt >= before + 86400 * 1000);
+  assert.deepEqual(written.claudeAiOauth.scopes, ["user:inference", "user:plugins", "user:profile"]);
+  assert.equal(written.claudeAiOauth.subscriptionType, "team");
+  assert.equal(written.claudeAiOauth.rateLimitTier, "default_claude_max_5x");
+});
+
+test("regression: Claude keeps the refreshed token for the current fetch when the keychain write fails", async () => {
+  const stored = { claudeAiOauth: { accessToken: "claude-expired-token", refreshToken: "claude-refresh-token", expiresAt: Date.now() - 60000 } };
+  const exec = async (argv, options = {}) => {
+    if (argv[0] === "/usr/bin/env") return ok("HOME=/tmp/home\nUSER=max\n");
+    if (argv[0] === "/usr/bin/security" && argv[1] === "find-generic-password" && argv.includes("max")) return ok(JSON.stringify(stored));
+    if (argv[0] === "/usr/bin/security" && argv[1] === "-i") return { exitCode: 2, stdout: "", stderr: "write failed" };
+    if (argv[2]?.includes("/tmp/muxy/ai-usage-raw-")) return ok("");
+    if (argv[0] === "/usr/bin/curl" && options.stdin.includes("platform.claude.com/v1/oauth/token")) {
+      return ok(`${JSON.stringify({ access_token: "claude-new-token", refresh_token: "claude-new-refresh", expires_in: 28800 })}\n200`);
+    }
+    if (argv[0] === "/usr/bin/curl" && options.stdin.includes("api.anthropic.com/api/oauth/usage")) {
+      if (!options.stdin.includes("Authorization: Bearer claude-new-token")) return ok("{}\n401");
+      return ok(`${JSON.stringify({ five_hour: { utilization: 12 } })}\n200`);
+    }
+    return fail();
+  };
+
+  const snapshots = await fetchLiveSnapshots({ exec, providerIDs: ["claude"] });
+  const claude = snapshots.find((snapshot) => snapshot.id === "claude");
+
+  assert.equal(claude.state.kind, "available");
+  assert.equal(claude.rows[0].percent, 12);
+});
+
+test("regression: Claude skips the refresh when the keychain write would exceed the security -i limit", async () => {
+  // Claude Code uses `security -i` only up to 4032 characters and otherwise falls back to argv.
+  // AI Usage must not put the token in argv, and must not spend the refresh token it cannot store.
+  const stored = { claudeAiOauth: { accessToken: "claude-expired-token", refreshToken: "claude-refresh-token", expiresAt: Date.now() - 60000 }, mcpOAuth: { big: "m".repeat(2000) } };
+  const calls = [];
+  const exec = async (argv, options = {}) => {
+    calls.push({ argv, options });
+    if (argv[0] === "/usr/bin/env") return ok("HOME=/tmp/home\nUSER=max\n");
+    if (argv[0] === "/usr/bin/security" && argv[1] === "find-generic-password" && argv.includes("max")) return ok(JSON.stringify(stored));
+    if (argv[2]?.includes("/tmp/muxy/ai-usage-raw-")) return ok("");
+    if (argv[0] === "/usr/bin/curl" && options.stdin.includes("api.anthropic.com/api/oauth/usage")) return ok("{}\n401");
+    return fail();
+  };
+
+  const snapshots = await fetchLiveSnapshots({ exec, providerIDs: ["claude"] });
+  const claude = snapshots.find((snapshot) => snapshot.id === "claude");
+
+  assert.equal(claude.state.message, "Sign in to Claude");
+  assert.equal(calls.some((call) => call.options.stdin?.includes("platform.claude.com/v1/oauth/token")), false);
+  assert.equal(calls.some((call) => call.argv[0] === "/usr/bin/security" && call.argv[1] !== "find-generic-password"), false);
+});
+
 test("regression: live provider fetch parses MiniMax remains", async () => {
   const exec = async (argv, options = {}) => {
     if (argv[0] === "/usr/bin/env") return ok("HOME=/tmp/home\nMINIMAX_API_KEY=minimax-token\n");
